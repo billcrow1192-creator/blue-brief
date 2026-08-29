@@ -1,0 +1,91 @@
+name: Build Japanese narration
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/build-japanese-narration.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  narration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install audio tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y p7zip-full jq ffmpeg
+
+      - name: Download and verify VOICEVOX Nemo
+        run: |
+          curl -fL --retry 3             -o voicevox_engine-linux-cpu-x64-0.24.0.7z.001             https://github.com/VOICEVOX/voicevox_nemo_engine/releases/download/0.24.0/voicevox_engine-linux-cpu-x64-0.24.0.7z.001
+          echo "c2af9ddf42dd28f55e831f0e76f605321daaec981dda3c8be558c734dc6830e7  voicevox_engine-linux-cpu-x64-0.24.0.7z.001" | sha256sum -c -
+          mkdir -p engine
+          7z x -y voicevox_engine-linux-cpu-x64-0.24.0.7z.001 -oengine
+
+      - name: Start local synthesis engine
+        run: |
+          engine_bin="$(find engine -type f -name run -perm -u+x | head -1)"
+          if [ -z "$engine_bin" ]; then
+            engine_bin="$(find engine -type f -name run | head -1)"
+            chmod +x "$engine_bin"
+          fi
+          "$engine_bin" --host 127.0.0.1 --port 50021 > voicevox.log 2>&1 &
+          for i in $(seq 1 90); do
+            if curl -fsS http://127.0.0.1:50021/version > /dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          cat voicevox.log
+          exit 1
+
+      - name: Synthesize narration
+        run: |
+          mkdir -p narration
+          curl -fsS http://127.0.0.1:50021/speakers > narration/speakers.json
+          speaker_id="$(jq -r '([.[] | select(.name | contains("女性1")) | .styles[0].id][0]) // .[0].styles[0].id' narration/speakers.json)"
+          cat > narration/segments.txt <<'SEGMENTS'
+          ブルー・ブリーフは、通信が限られる危機下で、「誰に、何を、どこまで渡すか」を検証する意思決定シミュレーターです。情報を増やすほど、安全になるとは限りません。必要な相手へ、判断に必要な範囲だけを届ける設計を比較します。
+          異なる役割を持つ五つの組織エーアイが、エルエルエムを使って判断します。シナリオ、通信制約、シードをそろえ、情報共有の方式だけを変えます。これにより、方式の違いが協調へ与える影響を、同じ条件で追跡できます。
+          エーは、ラベルだけを送る方式です。通信は軽い一方、判断の文脈が不足します。ビーは、詳細を常に送る方式です。情報は残りますが、通信量と受け手の負担が増えます。シーは、相手と状況に応じて内容と粒度を変える、適応型安全パケットです。
+          シーが常に優れているとは仮定しません。エー、ビー、シーを同じ基準で比べ、何が伝わり、何が省かれ、誰に届いたのかを確認します。情報不足と過剰共有、その両方のトレードオフを、再現できる形で観察します。
+          ここでは、記録済みのエルエルエム実験を示します。五つの役割が二ラウンドで判断し、宛先付きの通信を二十七件生成しました。さらに監査役を一つ置き、誰が誰に何を渡したか、判断の経緯を記録から追えるようにしています。
+          同じシードのシミュレーションでは、エーは通信を抑えますが、応答と信頼の指標が下がりました。ビーは信頼を保つ一方、帯域を大きく使います。シーは、この条件では、信頼九十四パーセント、応答五分、帯域八倍となりました。これは実世界の優位性ではなく、モデル内の比較結果です。
+          ブルー・ブリーフが支援するのは、共有案の作成、送信範囲の制御、記録までです。送るか、実行するかの最終権限は人間に残します。また、今回使うのは合成データです。実務環境での有効性や安全性は、まだ検証していません。
+          ブルー・ブリーフが観測するのは、災害そのものではありません。情報を削る場所を変えたとき、組織の協調がどう変わるかです。安全を決めるのは、情報量ではなく、役割に合った情報配分である。この仮説を、比較し、記録し、監査できるプロトタイプとして提案します。
+          SEGMENTS
+
+          n=0
+          while IFS= read -r text; do
+            n=$((n + 1))
+            file="$(printf '%02d' "$n")"
+            curl -fsS -X POST -G               --data-urlencode "text=$text"               --data-urlencode "speaker=$speaker_id"               http://127.0.0.1:50021/audio_query               | jq '.speedScale=1.05 | .intonationScale=1.04 | .volumeScale=1.0 | .prePhonemeLength=0.12 | .postPhonemeLength=0.32 | .outputSamplingRate=48000'               > "narration/$file.json"
+            curl -fsS -X POST               -H 'Content-Type: application/json'               --data-binary @"narration/$file.json"               "http://127.0.0.1:50021/synthesis?speaker=$speaker_id"               > "narration/$file.wav"
+          done < narration/segments.txt
+
+          {
+            for f in narration/[0-9][0-9].wav; do
+              printf "file '%s'\n" "$(realpath "$f")"
+            done
+          } > narration/concat.txt
+
+          ffmpeg -hide_banner -y -f concat -safe 0 -i narration/concat.txt             -af "loudnorm=I=-16:LRA=7:TP=-1.5"             -ar 48000 narration/0156_HiroPa_BLUE_BRIEF_Narration.wav
+          ffmpeg -hide_banner -y -i narration/0156_HiroPa_BLUE_BRIEF_Narration.wav             -c:a aac -b:a 192k narration/0156_HiroPa_BLUE_BRIEF_Narration.m4a
+          ffprobe -v error -show_entries format=duration             -of default=noprint_wrappers=1:nokey=1 narration/0156_HiroPa_BLUE_BRIEF_Narration.wav
+
+      - name: Upload narration
+        uses: actions/upload-artifact@v4
+        with:
+          name: blue-brief-japanese-narration
+          path: |
+            narration/0156_HiroPa_BLUE_BRIEF_Narration.wav
+            narration/0156_HiroPa_BLUE_BRIEF_Narration.m4a
+            narration/[0-9][0-9].wav
+            narration/speakers.json
+          retention-days: 3
