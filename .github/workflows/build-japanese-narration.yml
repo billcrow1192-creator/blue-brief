@@ -87,5 +87,6 @@ jobs:
             narration/0156_HiroPa_BLUE_BRIEF_Narration.wav
             narration/0156_HiroPa_BLUE_BRIEF_Narration.m4a
             narration/[0-9][0-9].wav
+            narration/[0-9][0-9].json
             narration/speakers.json
           retention-days: 3
